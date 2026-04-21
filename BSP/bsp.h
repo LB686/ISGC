@@ -14,7 +14,7 @@
 #ifndef __BSP_H_
 #define __BSP_H_
 
-#define  USE_FreeRTOS      1
+#define  USE_FreeRTOS      0
 #define  CUBEMX_CONFIG     1                //cubemx配置宏，通过预编译指令避免cubemx更改用户代码,1表示开启防更改功能
 
 
@@ -30,7 +30,7 @@
 	#define DISABLE_INT()	__set_PRIMASK(1)	/* 禁止全局中断 */
 #endif
 
-#include "stm32G4xx_hal.h"
+#include "stm32F4xx_hal.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

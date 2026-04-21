@@ -1,29 +1,88 @@
-/**
- * @brief    电机串口通讯协议
- * @file     app_motor_uart_parse.h
- * @details  
- * @author   LB
- * @version  V1.0
- * @date     2026/04/14
- * @license  Copyright (c) 2024-2026 浙江华奕航空科技有限公司.All rights reserved.
- */
+/*
+*********************************************************************************************************
+*
+*   模块名称 : 电机串口协议解析应用模块
+*   文件名称 : app_motor_uart_parse.h
+*   版    本 : V1.0
+*   说    明 : 基于 2000W 启发一体系统 RS232 协议进行帧解析与命令分发，具备高可扩展性。
+*              协议帧格式: 0x02 [LEN] [TYPE] [DATA] [CRC16_L] [CRC16_H] 0x03
+*   修改记录 :
+*       版本号  日期         作者      说明
+*       V1.0    2026-04-21   xxx      应用创建
+*
+*********************************************************************************************************
+*/
 
-#ifndef __APP_MOTOR_UART_PARSE_H_
-#define __APP_MOTOR_UART_PARSE_H_
+#ifndef __APP_MOTOR_UART_PARSE_H__
+#define __APP_MOTOR_UART_PARSE_H__
 
-/* Includes ------------------------------------------------------------------*/
-#include "../../app/app_motor_vf_demo.h"
+#include <stdint.h>
 #include "../../bsp/inc/bsp_uart.h"
 
-/* Exported variables --------------------------------------------------------*/
-extern uint8_t uart_debug_buff[32];
+/* ===============================================================================================
+ *                                  帧格式与协议常量定义
+ * =============================================================================================== */
 
-/* Exported functions --------------------------------------------------------*/
-void uart_MotorDataSend(void);
-void uart_MotorDataParse(void);
-void usart3_frame_assemble(uint8_t b);
+#define MOTOR_UART_FRAME_HEAD       0x02    /* 帧头 */
+#define MOTOR_UART_FRAME_TAIL       0x03    /* 帧尾 */
+#define MOTOR_UART_CRC_POLY         0xA001  /* CRC-16 多项式(Modbus) */
+#define MOTOR_UART_MAX_DATA_LEN     64      /* 数据域最大长度(覆盖遥测57字节并预留扩展) */
 
-#endif /* __APP_MOTOR_UART_PARSE_H_ */
+/* ===============================================================================================
+ *                                  命令/帧类型枚举
+ * =============================================================================================== */
+
+typedef enum {
+    MOTOR_CMD_TEL       = 0x04,     /* 遥测上报 */
+    MOTOR_CMD_START     = 0x05,     /* 启动 */
+    MOTOR_CMD_SET_I     = 0x06,     /* 设置电流 */
+    MOTOR_CMD_SET_SPD   = 0x08,     /* 设置转速 */
+    /* 新增命令只需在此追加枚举值，并在命令表中注册解析函数即可 */
+} MOTOR_CMD_TYPE_E;
+
+/* ===============================================================================================
+ *                                  电机遥测数据结构
+ * =============================================================================================== */
+
+typedef struct {
+    int16_t  mos_temp;          /* MOS温度, 分辨率 0.1℃ */
+    int16_t  mot_temp;          /* 电机温度, 分辨率 0.1℃ */
+    int32_t  phase_current;     /* 相电流, 分辨率 0.01A */
+    int32_t  bus_current;       /* 母线电流, 分辨率 0.01A */
+    int32_t  id_current;        /* d轴电流, 分辨率 0.01A */
+    int32_t  iq_current;        /* q轴电流, 分辨率 0.01A */
+    uint16_t duty;              /* 占空比, 分辨率 0.001 */
+    int32_t  elec_speed;        /* 电转速, 分辨率 1rpm */
+    uint16_t bus_voltage;       /* 母线电压, 分辨率 0.1V */
+    uint8_t  fault;             /* 故障码 */
+    uint32_t position;          /* 位置, 分辨率 0.000001 */
+} tagMOTOR_Telemetry_T;
+
+/* ===============================================================================================
+ *                                  回调函数指针类型定义(可扩展钩子)
+ * =============================================================================================== */
+
+/* 通用命令接收回调: 可用于上层监听所有解析到的命令帧 */
+typedef void (*MOTOR_RxCallback_t)(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8_t len);
+
+/* 遥测数据更新回调: 每当收到一帧完整遥测时触发 */
+typedef void (*MOTOR_TelUpdateCallback_t)(const MOTOR_Telemetry_t *tel);
+
+/* ===============================================================================================
+ *                                  对外接口声明
+ * =============================================================================================== */
+
+void APP_MotorUartParse_Init(void);
+void APP_MotorUartParse_Reset(void);
+void APP_MotorUartParse_Process(uint8_t chr);
+
+const MOTOR_Telemetry_t* APP_MotorUartParse_GetTelemetry(void);
+void APP_MotorUartParse_SendCmd(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8_t len);
+
+/* 回调注册接口(高可扩展: 上层可在不修改本模块源码的情况下注入自定义逻辑) */
+void APP_MotorUartParse_RegisterRxCallback(MOTOR_RxCallback_t cb);
+void APP_MotorUartParse_RegisterTelCallback(MOTOR_TelUpdateCallback_t cb);
+
+#endif /* __APP_MOTOR_UART_PARSE_H__ */
 
 /***************************** (END OF FILE) *********************************/
-
