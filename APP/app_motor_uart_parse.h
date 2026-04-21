@@ -33,7 +33,7 @@
  * =============================================================================================== */
 
 typedef enum {
-    MOTOR_CMD_TEL       = 0x04,     /* 遥测上报 */
+    MOTOR_CMD_TEL       = 0x04,     /* 遥测指令， */
     MOTOR_CMD_START     = 0x05,     /* 启动 */
     MOTOR_CMD_SET_I     = 0x06,     /* 设置电流 */
     MOTOR_CMD_SET_SPD   = 0x08,     /* 设置转速 */
@@ -65,8 +65,7 @@ typedef struct {
 /* 通用命令接收回调: 可用于上层监听所有解析到的命令帧 */
 typedef void (*MOTOR_RxCallback_t)(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8_t len);
 
-/* 遥测数据更新回调: 每当收到一帧完整遥测时触发 */
-typedef void (*MOTOR_TelUpdateCallback_t)(const MOTOR_Telemetry_t *tel);
+
 
 /* ===============================================================================================
  *                                  对外接口声明
@@ -76,12 +75,12 @@ void APP_MotorUartParse_Init(void);
 void APP_MotorUartParse_Reset(void);
 void APP_MotorUartParse_Process(uint8_t chr);
 
-const MOTOR_Telemetry_t* APP_MotorUartParse_GetTelemetry(void);
+const tagMOTOR_Telemetry_T* APP_MotorUartParse_GetTelemetry(void);
 void APP_MotorUartParse_SendCmd(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8_t len);
 
 /* 回调注册接口(高可扩展: 上层可在不修改本模块源码的情况下注入自定义逻辑) */
 void APP_MotorUartParse_RegisterRxCallback(MOTOR_RxCallback_t cb);
-void APP_MotorUartParse_RegisterTelCallback(MOTOR_TelUpdateCallback_t cb);
+
 
 #endif /* __APP_MOTOR_UART_PARSE_H__ */
 
