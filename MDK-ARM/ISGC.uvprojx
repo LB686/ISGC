@@ -421,6 +421,13 @@
         </Group>
         <Group>
           <GroupName>Application/User/App</GroupName>
+          <Files>
+            <File>
+              <FileName>app_motor_uart_parse.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\APP\app_motor_uart_parse.c</FilePath>
+            </File>
+          </Files>
         </Group>
         <Group>
           <GroupName>Application/User/Bsp</GroupName>

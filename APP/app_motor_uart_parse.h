@@ -8,7 +8,7 @@
 *              协议帧格式: 0x02 [LEN] [TYPE] [DATA] [CRC16_L] [CRC16_H] 0x03
 *   修改记录 :
 *       版本号  日期         作者      说明
-*       V1.0    2026-04-21   xxx      应用创建
+*       V1.0    2026-04-21   LB      应用创建
 *
 *********************************************************************************************************
 */
@@ -25,8 +25,8 @@
 
 #define MOTOR_UART_FRAME_HEAD       0x02    /* 帧头 */
 #define MOTOR_UART_FRAME_TAIL       0x03    /* 帧尾 */
-#define MOTOR_UART_CRC_POLY         0xA001  /* CRC-16 多项式(Modbus) */
-#define MOTOR_UART_MAX_DATA_LEN     64      /* 数据域最大长度(覆盖遥测57字节并预留扩展) */
+#define MOTOR_UART_CRC_POLY         0x1021  /* CRC-16 多项式(CCITT) */
+#define MOTOR_UART_MAX_DATA_LEN     60      /* 数据域最大长度(覆盖遥测57字节并预留扩展) */
 
 /* ===============================================================================================
  *                                  命令/帧类型枚举
@@ -71,9 +71,9 @@ typedef void (*MOTOR_RxCallback_t)(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, ui
  *                                  对外接口声明
  * =============================================================================================== */
 
-void APP_MotorUartParse_Init(void);
+void APP_MotorUartParse_Init(void);					
 void APP_MotorUartParse_Reset(void);
-void APP_MotorUartParse_Process(uint8_t chr);
+void APP_MotorUartParse_Process(uint8_t chr);		
 
 const tagMOTOR_Telemetry_T* APP_MotorUartParse_GetTelemetry(void);
 void APP_MotorUartParse_SendCmd(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8_t len);

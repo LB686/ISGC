@@ -5,11 +5,11 @@
 *   文件名称 : app_motor_uart_parse.c
 *   版    本 : V1.0
 *   说    明 : 基于 2000W 启发一体系统 RS232 协议进行帧解析与命令分发。
-*              采用状态机逐字节解析帧格式，支持 CRC16(Modbus) 校验。
+*              采用状态机逐字节解析帧格式，支持 CRC16(CCITT) 校验。
 *              命令解析采用"查表+函数指针"方式，新增命令无需修改解析主干逻辑。
 *   修改记录 :
 *       版本号  日期         作者      说明
-*       V1.0    2026-04-21   xxx      应用创建
+*       V1.0    2026-04-21   LB      应用创建
 *
 *********************************************************************************************************
 */
@@ -41,16 +41,15 @@ typedef struct {
 
 /* Private variables ----------------------------------------------------------*/
 
-static FRAME_PARSE_STATE_E          s_frameState;                       /* 当前解析状态 */
-static uint8_t                      s_rxBuf[MOTOR_UART_MAX_DATA_LEN];   /* 连续接收缓存(LEN+TYPE+DATA) */
-static uint8_t                      s_rxIndex;                          /* 接收缓存写入索引 */
-static uint8_t                      s_rxLen;                            /* LEN 字段值(TYPE+DATA长度) */
-static uint8_t                      s_crcL;                             /* 接收到的 CRC 低字节 */
-static uint8_t                      s_crcH;                             /* 接收到的 CRC 高字节 */
+static FRAME_PARSE_STATE_E          s_frameState;                       	/* 当前解析状态 */
+static uint8_t                      s_rxBuf[MOTOR_UART_MAX_DATA_LEN + 2];   /* 连续接收缓存(LEN+TYPE+DATA) */
+static uint8_t                      s_rxIndex;                          	/* 接收缓存写入索引 */
+static uint8_t                      s_rxLen;                            	/* LEN 字段值(TYPE+DATA长度) */
+static uint8_t                      s_crcL;                             	/* 接收到的 CRC 低字节 */
+static uint8_t                      s_crcH;                             	/* 接收到的 CRC 高字节 */
 
-static tagMOTOR_Telemetry_T         s_telemetry;                        /* 最新遥测数据副本 */
-
-static MOTOR_RxCallback_t           s_rxCallback;                       /* 通用接收回调 */
+static tagMOTOR_Telemetry_T         s_telemetry;                        	/* 最新遥测数据副本 */
+static MOTOR_RxCallback_t           s_rxCallback;                       	/* 通用接收回调 */
 
 /* Private function prototypes ------------------------------------------------*/
 
@@ -58,23 +57,14 @@ static uint16_t MOTOR_UART_CalcCRC16(const uint8_t *data, uint16_t len);
 static void     MOTOR_DispatchCmd(uint8_t cmdType, const uint8_t *data, uint8_t len);
 static void     MOTOR_FrameComplete(void);
 
-/* 各命令解析函数前向声明 */
-
+/* 命令解析函数*/
 static void MOTOR_ParseStart(const uint8_t *data, uint8_t len);
 static void MOTOR_ParseSetI(const uint8_t *data, uint8_t len);
 static void MOTOR_ParseSetSpd(const uint8_t *data, uint8_t len);
 static void MOTOR_ParseTelemetry(const uint8_t *data, uint8_t len);
 
-/* 小端数据解析辅助函数 */
-static int16_t  MOTOR_ParseInt16LE(const uint8_t *p);
-static uint16_t MOTOR_ParseUInt16LE(const uint8_t *p);
-static int32_t  MOTOR_ParseInt32LE(const uint8_t *p);
-static uint32_t MOTOR_ParseUInt32LE(const uint8_t *p);
-
-
-
 /* ===============================================================================================
- *                                  命令解析表(核心可扩展点)
+ *                                  命令解析表
  * 说明: 新增命令时，只需编写对应的 parseFunc 函数，并在此表中添加一行映射关系即可。
  *       无需修改状态机主干逻辑，实现命令解析的"插件化"。
  * =============================================================================================== */
@@ -93,7 +83,7 @@ static const tagMOTOR_CmdTableItem_T s_cmdTable[] = {
 /*
 *********************************************************************************************************
 *   函 数 名: MOTOR_UART_CalcCRC16
-*   功能说明: 计算 Modbus CRC-16 校验值
+*   功能说明: 计算 CRC-16/CCITT 校验值（初始值0x0000，多项式0x1021，MSB first）
 *   形    参: data  待校验数据指针
 *             len   数据长度(字节)
 *   返 回 值: CRC16 结果
@@ -101,49 +91,22 @@ static const tagMOTOR_CmdTableItem_T s_cmdTable[] = {
 */
 static uint16_t MOTOR_UART_CalcCRC16(const uint8_t *data, uint16_t len)
 {
-    uint16_t crc = 0xFFFF;
+    uint16_t crc = 0x0000;
     uint16_t i, j;
 
     for (i = 0; i < len; i++) {
-        crc ^= (uint16_t)data[i];
+        crc ^= (uint16_t)data[i] << 8;
         for (j = 0; j < 8; j++) {
-            if (crc & 0x0001) {
-                crc = (crc >> 1) ^ MOTOR_UART_CRC_POLY;
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ MOTOR_UART_CRC_POLY;
             } else {
-                crc >>= 1;
+                crc <<= 1;
             }
         }
     }
     return crc;
 }
 
-/*
-*********************************************************************************************************
-*   函 数 名: MOTOR_ParseInt16LE / MOTOR_ParseUInt16LE / MOTOR_ParseInt32LE / MOTOR_ParseUInt32LE
-*   功能说明: 小端序数据解析辅助函数
-*********************************************************************************************************
-*/
-static int16_t MOTOR_ParseInt16LE(const uint8_t *p)
-{
-    return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint16_t MOTOR_ParseUInt16LE(const uint8_t *p)
-{
-    return ((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-}
-
-static int32_t MOTOR_ParseInt32LE(const uint8_t *p)
-{
-    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
-}
-
-static uint32_t MOTOR_ParseUInt32LE(const uint8_t *p)
-{
-    return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
-}
 
 /* ===============================================================================================
  *                                  命令解析函数实现
@@ -160,9 +123,7 @@ static uint32_t MOTOR_ParseUInt32LE(const uint8_t *p)
 */
 static void MOTOR_ParseStart(const uint8_t *data, uint8_t len)
 {
-    (void)data;
-    (void)len;
-    /* 根据协议，启动命令数据域为 0x00017318，可在此扩展响应处理 */
+    /* 根据协议，启动命令数据域为 0x00017318，17318为，占空比可在此扩展响应处理 */
 }
 
 /*
@@ -210,40 +171,52 @@ static void MOTOR_ParseTelemetry(const uint8_t *data, uint8_t len)
 {
     uint8_t txBuf[57];
 
-    (void)data;
-    (void)len;
-
     /* 将单片机实时状态拷贝至 s_telemetry */
     /* TODO: 以下赋值请替换为你的实际全局变量 */
-    // s_telemetry.mos_temp       = g_motor.mos_temp;
-    // s_telemetry.mot_temp       = g_motor.mot_temp;
-    // s_telemetry.phase_current  = g_motor.phase_current;
-    // s_telemetry.bus_current    = g_motor.bus_current;
-    // s_telemetry.id_current     = g_motor.id_current;
-    // s_telemetry.iq_current     = g_motor.iq_current;
-    // s_telemetry.duty           = g_motor.duty;
-    // s_telemetry.elec_speed     = g_motor.elec_speed;
-    // s_telemetry.bus_voltage    = g_motor.bus_voltage;
-    // s_telemetry.fault          = g_motor.fault;
-    // s_telemetry.position       = g_motor.position;
+    tagMOTOR_Telemetry_T g_motor = {
+    .mos_temp      = 250,    // 25.0℃
+    .mot_temp      = 300,    // 30.0℃
+    .phase_current = 500,    // 5.00A
+    .bus_current   = 2000,   // 20.00A
+    .id_current    = -100,   // -1.00A
+    .iq_current    = 1500,   // 15.00A
+    .duty          = 500,    // 0.500 (50.0%)
+    .elec_speed    = 3000,   // 3000 rpm
+    .bus_voltage   = 240,    // 24.0V
+    .fault         = 0,      // 无故障
+    .position      = 360000000UL  // 360.000000 (假设单位是度或弧度)
+    };
+
+
+    s_telemetry.mos_temp       = g_motor.mos_temp;
+    s_telemetry.mot_temp       = g_motor.mot_temp;
+    s_telemetry.phase_current  = g_motor.phase_current;
+    s_telemetry.bus_current    = g_motor.bus_current;
+    s_telemetry.id_current     = g_motor.id_current;
+    s_telemetry.iq_current     = g_motor.iq_current;
+    s_telemetry.duty           = g_motor.duty;
+    s_telemetry.elec_speed     = g_motor.elec_speed;
+    s_telemetry.bus_voltage    = g_motor.bus_voltage;
+    s_telemetry.fault          = g_motor.fault;
+    s_telemetry.position       = g_motor.position;
 
     /*
      * 将 s_telemetry 各字段按协议 BYTE1-57 的顺序逐个拷贝到 txBuf。
      * 不直接传结构体指针的原因：C 编译器可能对结构体插入填充字节(padding)，
      * 导致内存布局与协议要求的 57 字节紧凑格式不一致，因此必须手动按字段拷贝。
      */
-    memcpy(&txBuf[0],  &s_telemetry.mos_temp,       2);  /* BYTE1-2   MOS温度 */
-    memcpy(&txBuf[2],  &s_telemetry.mot_temp,       2);  /* BYTE3-4   电机温度 */
-    memcpy(&txBuf[4],  &s_telemetry.phase_current,  4);  /* BYTE5-8   相电流 */
-    memcpy(&txBuf[8],  &s_telemetry.bus_current,    4);  /* BYTE9-12  母线电流 */
-    memcpy(&txBuf[12], &s_telemetry.id_current,     4);  /* BYTE13-16 Id */
-    memcpy(&txBuf[16], &s_telemetry.iq_current,     4);  /* BYTE17-20 Iq */
-    memcpy(&txBuf[20], &s_telemetry.duty,           2);  /* BYTE21-22 占空比 */
-    memcpy(&txBuf[22], &s_telemetry.elec_speed,     4);  /* BYTE23-26 电转速 */
-    memcpy(&txBuf[26], &s_telemetry.bus_voltage,    2);  /* BYTE27-28 母线电压 */
-    memset(&txBuf[28], 0, 25);                            /* BYTE29-52 保留/未定义，填 0 */
-    txBuf[52] = s_telemetry.fault;                        /* BYTE53    故障码 */
-    memcpy(&txBuf[53], &s_telemetry.position,        4);  /* BYTE54-57 位置 */
+    memcpy(&txBuf[0],  &s_telemetry.mos_temp,       2);  	/* BYTE1-2   MOS温度 */
+    memcpy(&txBuf[2],  &s_telemetry.mot_temp,       2);  	/* BYTE3-4   电机温度 */
+    memcpy(&txBuf[4],  &s_telemetry.phase_current,  4);  	/* BYTE5-8   相电流 */
+    memcpy(&txBuf[8],  &s_telemetry.bus_current,    4);  	/* BYTE9-12  母线电流 */
+    memcpy(&txBuf[12], &s_telemetry.id_current,     4);  	/* BYTE13-16 Id */
+    memcpy(&txBuf[16], &s_telemetry.iq_current,     4);  	/* BYTE17-20 Iq */
+    memcpy(&txBuf[20], &s_telemetry.duty,           2);  	/* BYTE21-22 占空比 */
+    memcpy(&txBuf[22], &s_telemetry.elec_speed,     4);  	/* BYTE23-26 电转速 */
+    memcpy(&txBuf[26], &s_telemetry.bus_voltage,    2);  	/* BYTE27-28 母线电压 */
+    memset(&txBuf[28], 0, 25);                            	/* BYTE29-52 保留/未定义，填 0 */
+    txBuf[52] = s_telemetry.fault;                        	/* BYTE53    故障码 */
+    memcpy(&txBuf[53], &s_telemetry.position,        4);  	/* BYTE54-57 位置 */
 
     /* 回传遥测帧给上位机 */
     APP_MotorUartParse_SendCmd(MOTOR_CMD_TEL, txBuf, 57);
@@ -293,9 +266,10 @@ static void MOTOR_FrameComplete(void)
     uint8_t  cmdType;
     uint8_t  dataLen;
 
-    /* CRC 计算范围: LEN + TYPE + DATA，长度 = s_rxLen + 1(LEN字段本身) */
-    calcCrc = MOTOR_UART_CalcCRC16(s_rxBuf, (uint16_t)(s_rxLen + 1));
-    recvCrc = ((uint16_t)s_crcH << 8) | s_crcL;
+    /* CRC 计算范围: TYPE + DATA（不含LEN），s_rxBuf[0]=LEN, s_rxBuf[1]=TYPE */
+    calcCrc = MOTOR_UART_CalcCRC16(&s_rxBuf[1], (uint16_t)s_rxLen);
+    /* 帧中CRC字段为高字节在前，s_crcL先收到的是高字节，s_crcH后收到的是低字节 */
+    recvCrc = ((uint16_t)s_crcL << 8) | s_crcH;
 
     if (calcCrc != recvCrc) {
         /* CRC 校验失败，可在此添加错误计数或日志 */
@@ -460,10 +434,10 @@ void APP_MotorUartParse_SendCmd(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8
         idx += len;
     }
 
-    /* CRC 计算范围: LEN + TYPE + DATA，长度 = payloadLen + 1 */
-    crc = MOTOR_UART_CalcCRC16(&txBuf[1], (uint16_t)(payloadLen + 1));
-    txBuf[idx++] = (uint8_t)(crc & 0xFF);       /* CRC 低字节 */
+    /* CRC 计算范围: TYPE + DATA（不含LEN），txBuf[2]=TYPE, txBuf[3..]=DATA */
+    crc = MOTOR_UART_CalcCRC16(&txBuf[2], (uint16_t)payloadLen);
     txBuf[idx++] = (uint8_t)((crc >> 8) & 0xFF);/* CRC 高字节 */
+    txBuf[idx++] = (uint8_t)(crc & 0xFF);       /* CRC 低字节 */
     txBuf[idx++] = MOTOR_UART_FRAME_TAIL;
 
     usart3_send(txBuf, idx);
@@ -480,19 +454,6 @@ void APP_MotorUartParse_SendCmd(MOTOR_CMD_TYPE_E cmd, const uint8_t *data, uint8
 void APP_MotorUartParse_RegisterRxCallback(MOTOR_RxCallback_t cb)
 {
     s_rxCallback = cb;
-}
-
-/*
-*********************************************************************************************************
-*   函 数 名: APP_MotorUartParse_RegisterTelFillCallback
-*   功能说明: 注册遥测数据填充回调(收到 0x04 请求时触发，让用户直接填入实时变量)
-*   形    参: cb  回调函数指针，NULL 表示注销
-*   返 回 值: 无
-*********************************************************************************************************
-*/
-void APP_MotorUartParse_RegisterTelFillCallback(MOTOR_TelFillCallback_t cb)
-{
-    s_telFillCb = cb;
 }
 
 /***************************** (END OF FILE) *********************************/
