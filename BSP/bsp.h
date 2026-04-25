@@ -41,10 +41,29 @@
 #include "../../bsp/inc/bsp_uart.h"
 //#include "../../bsp/inc/bsp_uart_config.h"
 #include "../../bsp/bsp_ringbuff.h"
-#include "../../bsp/inc/bsp_user_lib.h"
+//#include "../../bsp/inc/bsp_user_lib.h"
 
 
+//空闲调用
+void hal_fast_loop(void);
 
+//1000Hz(1ms)调用
+void hal_1000hz_loop(void);
+
+//100Hz(10ms)调用
+void hal_100hz_loop(void);
+
+//50Hz(20ms)调用
+void hal_50hz_loop(void);
+
+//10Hz(100ms)调用
+void hal_10hz_loop(void);
+
+//2Hz(500ms)调用
+void hal_2hz_loop(void);
+
+//1Hz(1000ms)调用
+void hal_1hz_loop(void);
 
 
 /* 提供给其他C文件调用的函数 */
@@ -52,4 +71,4 @@ void bsp_Init(void);
 
 #endif
 
-/***************************** 安富莱电子 www.armfly.com (END OF FILE) *********************************/
+/***************************** (END OF FILE) *********************************/

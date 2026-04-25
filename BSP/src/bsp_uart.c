@@ -163,7 +163,7 @@ static void usart3_loop(void){
 	uint8_t chr;
 	while(!fifo_is_empty(&usart3_rx_buffer)) {
 		if (fifo_pop_byte(&usart3_rx_buffer, &chr)) {
-			APP_MotorUartParse_Process(chr);    //数据解析
+			//APP_MotorUartParse_Process(chr);    //数据解析
 		}
 	}
 }

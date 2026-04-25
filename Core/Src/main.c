@@ -28,12 +28,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "../../bsp/bsp.h"
+#include "../../bsp/bsp_system_time.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+const TIM_HandleTypeDef *htim_system = &htim5;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -105,7 +106,11 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC2_Init();
   MX_IWDG_Init();
+  MX_TIM5_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  __HAL_DBGMCU_FREEZE_IWDG();	// 调试时冻结 IWDG，避免断点导致复位
+  
   bsp_Init();
   
   /* USER CODE END 2 */
@@ -156,11 +161,6 @@ int main(void)
 		  last_1000Hz_timestamp = get_system_time_ms();
 			hal_1000hz_loop();
 		}
-		if(get_system_time_ms() > last_2000Hz_timestamp + 0.5)
-		{
-			last_2000Hz_timestamp = get_system_time_ms();
-			hal_2000hz_loop();
-		}	
   }
   /* USER CODE END 3 */
 }
@@ -212,7 +212,14 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if(htim->Instance == TIM5)
+	{
+	  system_timer_tick();
+	}
 
+}
 /* USER CODE END 4 */
 
 /**
