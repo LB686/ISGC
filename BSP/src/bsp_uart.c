@@ -37,6 +37,7 @@ static void usart3_got_byte(uint8_t b);                //获取数据字节
 static void usart3_loop(void);                         //串口3数据周期处理函数
 
 /* Public variables-----------------------------------------------------------*/
+static USART3_RxByteCallback_t s_usart3_rx_callback = NULL;  //用户注册的接收回调
 
 #if UART3_EN == 1
     uint8_t  usart3_data;                               //串口2数据接收字节
@@ -143,9 +144,12 @@ static void init_usart3_rx_fifo(void) {
 *********************************************************************************************************
 */
 static void usart3_got_byte(uint8_t b) {
-	 if (!fifo_push_byte(&usart3_rx_buffer, b)){
-		 
-	 }		
+	 /* 若注册了回调，直接传递字节，不再进FIFO（避免hal_fast_loop轮询时重复处理） */
+	 if (s_usart3_rx_callback != NULL) {
+		 s_usart3_rx_callback(b);
+	 } else {
+		 fifo_push_byte(&usart3_rx_buffer, b);
+	 }
 }
 
 /*
@@ -193,6 +197,19 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
     }else{
     
     }
+}
+
+/*
+*********************************************************************************************************
+*	函 数 名: usart3_register_rx_callback
+*	功能说明: 注册串口逐字节接收回调，用户无需修改驱动即可实现协议解析
+*	形    参: cb  回调函数指针，NULL表示注销
+*	返 回 值: 无
+*********************************************************************************************************
+*/
+void usart3_register_rx_callback(USART3_RxByteCallback_t cb)
+{
+    s_usart3_rx_callback = cb;
 }  
     
 /***************************************************************

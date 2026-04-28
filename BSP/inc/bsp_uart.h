@@ -25,10 +25,13 @@
 #define USART3_TX_FIFO_SIZE 1024
 #define USART3_RX_FIFO_SIZE 1024           
 
+/* 串口接收单字节回调类型（用户注册后，驱动在每次收到字节时直接调用） */
+typedef void (*USART3_RxByteCallback_t)(uint8_t byte);
+
 //串口数据发送
 void usart3_send(const uint8_t *buff, uint16_t len);
 
-//串口数据解析
+//串口数据解析（轮询方式，若使用回调可不再调用）
 void usart_dataparse(void);
 
 //串口配置
@@ -36,6 +39,9 @@ void usart_configure(void);
 
 //查看串口发送忙状态
 void read_usart_state(void);
+
+//注册串口接收回调（NULL表示注销）
+void usart3_register_rx_callback(USART3_RxByteCallback_t cb);
 
 #endif
 /***************************** (END OF FILE) *********************************/

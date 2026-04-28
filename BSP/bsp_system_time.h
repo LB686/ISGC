@@ -1,5 +1,5 @@
 /**
- * @brief    定时器模块，用于提供时基
+ * @brief    锟斤拷时锟斤拷模锟介，锟斤拷锟斤拷锟结供时锟斤拷
  * @file     bsp_system_time.c
  * @details  
  * @mainpage 
@@ -7,7 +7,7 @@
  * @email 
  * @version  V1.0
  * @date     2024/06/23
- * @license  Copyright (c) 2024-2024 浙江华奕航空科技有限公司.All rights reserved.
+ * @license  Copyright (c) 2024-2024 锟姐江锟斤拷锟饺猴拷锟秸科硷拷锟斤拷锟睫癸拷司.All rights reserved.
  */
 #ifndef __BSP_SYSTEM_TIME_H
 #define __BSP_SYSTEM_TIME_H
@@ -15,18 +15,18 @@
 #include "stdint.h"
 #include "main.h"
 
-///////////////使用方法////////////////////////
-//1、配置htim为1ms触发一次，向上计数，每1us记一次（ARR=1000）
-//2、htim的中断处理里system_timer_tick
-//3、定义const TIM_HandleTypeDef *htim_system
-//4、system_time_ms即为毫秒单位的系统时间
-//5、调用get_system_time_us获取us单位的系统时间
+///////////////使锟矫凤拷锟斤拷////////////////////////
+//1锟斤拷锟斤拷锟斤拷htim为1ms锟斤拷锟斤拷一锟轿ｏ拷锟斤拷锟较硷拷锟斤拷锟斤拷每1us锟斤拷一锟轿ｏ拷ARR=1000锟斤拷
+//2锟斤拷htim锟斤拷锟叫断达拷锟斤拷锟斤拷system_timer_tick
+//3锟斤拷锟斤拷锟斤拷const TIM_HandleTypeDef *htim_system
+//4锟斤拷system_time_ms锟斤拷为锟斤拷锟诫单位锟斤拷系统时锟斤拷
+//5锟斤拷锟斤拷锟斤拷get_system_time_us锟斤拷取us锟斤拷位锟斤拷系统时锟斤拷
 
-extern const TIM_HandleTypeDef *hitm_system;
+extern const TIM_HandleTypeDef *htim_system;
 extern uint64_t system_time_ms;
 
-inline uint64_t get_system_time_us(void);
-inline uint64_t get_system_time_ms(void);
+uint64_t get_system_time_us(void);
+uint64_t get_system_time_ms(void);
 void delay_us(uint64_t us);
 void delay_ms(uint64_t ms);
 extern void system_timer_tick(void);

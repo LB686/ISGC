@@ -1,21 +1,18 @@
 /*
 *********************************************************************************************************
-*   模块名称 : INA303电流/电压采集驱动模块
+*   模块名称 : INA303/BEMF/Vbus/Tempr 采集驱动模块（注入组版本）
 *   文件名称 : bsp_ina303.c
-*   版    本 : V1.0
-*   说    明 : 高可靠性、高可移植性INA303A1驱动实现
-*              - 3路双向电流（U/V/W相）+ 1路母线电压
-*              - ADC DMA连续采集，双缓冲处理
-*              - 滑动平均滤波，零偏校准，增益校准
-*              - 软件过流/欠流/过压/欠压保护（消抖+迟滞）
-*              - 发电阶段反电动势兼容（双向电流检测）
+*   版    本 : V2.1
+*   说    明 : - ADC1 注入组：三相电流（Iu/Iv/Iw），TIM1_CC4 RISING 触发，JEOC 中断
+*              - ADC2 注入组：三相 BEMF（A/B/C），TIM1_CC4 RISING 触发，JEOC 中断
+*              - ADC3 规则组：Vbus + Temp，软件轮询 1kHz
+*              - 滑动平均滤波，零偏校准，过流/过压保护（消抖+迟滞）
 *********************************************************************************************************
 */
 
 #include "../../bsp/inc/bsp_ina303.h"
 #include "../../bsp/bsp.h"
 #include <string.h>
-#include <math.h>
 
 /* =======================================================================================================
  * 内部宏定义
@@ -24,118 +21,104 @@
 /* 电流转换系数：A/LSB = Vref / 4096 / (Rsense * Gain) */
 #define INA303_CURR_SCALE_A_PER_LSB     ((INA303_VREF_V) / (INA303_ADC_RESOLUTION) / ((INA303_RSENSE_OHM) * (INA303_GAIN_VV)))
 
-/* 电压转换系数：V/LSB = Vref / 4096 / 分压比 */
-#define INA303_VOLT_SCALE_V_PER_LSB     ((INA303_VREF_V) / (INA303_ADC_RESOLUTION) / (INA303_BUS_DIV_RATIO))
+/* BEMF 转换系数：V/LSB = Vref / 4096 / BEMF_DIV_RATIO */
+#define INA303_BEMF_SCALE_V_PER_LSB     ((INA303_VREF_V) / (INA303_ADC_RESOLUTION) / (INA303_BEMF_DIV_RATIO))
 
-/* ADC最大有效值（12位） */
+/* 母线电压转换系数：V/LSB = Vref / 4096 / VBUS_DIV_RATIO */
+#define INA303_VBUS_SCALE_V_PER_LSB     ((INA303_VREF_V) / (INA303_ADC_RESOLUTION) / (INA303_VBUS_DIV_RATIO))
+
+/* 温度转换系数：°C/LSB */
+#define INA303_TEMP_SCALE_C_PER_LSB     (INA303_TEMP_SCALE_C_PER_LSB)
+
 #define INA303_ADC_MAX_VALUE            4095
 
-/* 零偏校准采样次数（2^n，用于求平均） */
-#define INA303_CAL_SAMPLE_SHIFT         6           /* 64次采样 */
+/* 零偏校准采样次数（2^n） */
+#define INA303_CAL_SAMPLE_SHIFT         6
 #define INA303_CAL_SAMPLE_NUM           (1U << INA303_CAL_SAMPLE_SHIFT)
+
+/* 临界区保护（如 bsp.h 未定义，使用底层指令） */
+#ifndef DISABLE_INT
+    #define DISABLE_INT()               __disable_irq()
+    #define ENABLE_INT()                __enable_irq()
+#endif
 
 /* =======================================================================================================
  * 内部数据结构
  * ======================================================================================================= */
 
-/* 单通道运行时数据 */
 typedef struct {
-    uint16_t rawAdc;                /* 最新原始ADC值 */
-    uint16_t filteredAdc;           /* 滤波后ADC值 */
-    float    physicalValue;         /* 物理量（电流A或电压V） */
-    int16_t  offsetAdc;             /* 零偏校准值（0A或0V对应的ADC值） */
-    float    gainCal;               /* 增益校准系数 */
-
-    /* 滑动平均滤波器 */
+    uint16_t rawAdc;
+    uint16_t filteredAdc;
+    float    physicalValue;
+    int16_t  offsetAdc;
+    float    gainCal;
     uint16_t filterBuf[INA303_FILTER_SIZE];
     uint32_t filterSum;
     uint8_t  filterIdx;
-    uint8_t  filterReady;           /* 滤波器已填满标志 */
-
-    /* 保护状态 */
-    uint16_t protDebounceOC;        /* 过流消抖计数 */
-    uint16_t protDebounceUC;        /* 欠流消抖计数 */
-    uint16_t protDebounceOV;        /* 过压消抖计数 */
-    uint16_t protDebounceUV;        /* 欠压消抖计数 */
-    uint8_t  protFlagOC;            /* 过流标志 */
-    uint8_t  protFlagUC;            /* 欠流标志 */
-    uint8_t  protFlagOV;            /* 过压标志 */
-    uint8_t  protFlagUV;            /* 欠压标志 */
+    uint8_t  filterReady;
+    uint16_t protDebounceOC;
+    uint16_t protDebounceUC;
+    uint16_t protDebounceOV;
+    uint16_t protDebounceUV;
+    uint8_t  protFlagOC;
+    uint8_t  protFlagUC;
+    uint8_t  protFlagOV;
+    uint8_t  protFlagUV;
 } INA303_ChannelData_t;
 
-/* 通道静态配置表（索引顺序与INA303_ChannelIndex_t一致） */
 typedef struct {
-    uint8_t  adcRank;               /* 在ADC扫描序列/DMA缓冲区中的位置 */
-    uint8_t  type;                  /* 0=电流, 1=电压 */
-    int16_t  defaultOffset;         /* 默认零偏 */
-    float    scaleFactor;           /* 转换系数 */
+    uint8_t  type;              /* 0=电流, 1=BEMF, 2=电压, 3=温度 */
+    int16_t  defaultOffset;
+    float    scaleFactor;
 } INA303_ChannelConfig_t;
 
 static const INA303_ChannelConfig_t s_chConfig[INA303_CH_NUM] = {
-    /* U相电流 */
-    {
-        .adcRank        = INA303_SCAN_IDX_IU,
-        .type           = INA303_TYPE_CURRENT,
-        .defaultOffset  = INA303_DEFAULT_OFFSET_ADC,
-        .scaleFactor    = INA303_CURR_SCALE_A_PER_LSB
-    },
-    /* V相电流 */
-    {
-        .adcRank        = INA303_SCAN_IDX_IV,
-        .type           = INA303_TYPE_CURRENT,
-        .defaultOffset  = INA303_DEFAULT_OFFSET_ADC,
-        .scaleFactor    = INA303_CURR_SCALE_A_PER_LSB
-    },
-    /* W相电流 */
-    {
-        .adcRank        = INA303_SCAN_IDX_IW,
-        .type           = INA303_TYPE_CURRENT,
-        .defaultOffset  = INA303_DEFAULT_OFFSET_ADC,
-        .scaleFactor    = INA303_CURR_SCALE_A_PER_LSB
-    },
-    /* 母线电压 */
-    {
-        .adcRank        = INA303_SCAN_IDX_VBUS,
-        .type           = INA303_TYPE_VOLTAGE,
-        .defaultOffset  = 0,        /* 0V时ADC理论值为0 */
-        .scaleFactor    = INA303_VOLT_SCALE_V_PER_LSB
-    }
+    {INA303_TYPE_CURRENT, INA303_DEFAULT_OFFSET_ADC, INA303_CURR_SCALE_A_PER_LSB},  /* IU     */
+    {INA303_TYPE_CURRENT, INA303_DEFAULT_OFFSET_ADC, INA303_CURR_SCALE_A_PER_LSB},  /* IV     */
+    {INA303_TYPE_CURRENT, INA303_DEFAULT_OFFSET_ADC, INA303_CURR_SCALE_A_PER_LSB},  /* IW     */
+    {INA303_TYPE_BEMF,    0,                         INA303_BEMF_SCALE_V_PER_LSB},   /* BEMF_A */
+    {INA303_TYPE_BEMF,    0,                         INA303_BEMF_SCALE_V_PER_LSB},   /* BEMF_B */
+    {INA303_TYPE_BEMF,    0,                         INA303_BEMF_SCALE_V_PER_LSB},   /* BEMF_C */
+    {INA303_TYPE_VOLTAGE, 0,                         INA303_VBUS_SCALE_V_PER_LSB},   /* VBUS   */
+    {INA303_TYPE_TEMP,    INA303_TEMP_OFFSET_ADC,    INA303_TEMP_SCALE_C_PER_LSB}    /* TEMP   */
 };
 
 /* =======================================================================================================
  * 内部变量
  * ======================================================================================================= */
 
-/* DMA缓冲区（双缓冲，必须对齐到32位以适配DMA） */
-#if INA303_DMA_BUFFER_DEPTH >= 2
-static uint16_t s_dmaBuffer[INA303_DMA_BUFFER_SIZE] __attribute__((aligned(4)));
-#else
-static uint16_t s_dmaBuffer[INA303_DMA_BUFFER_SIZE];
-#endif
+/* 注入组原始值（JEOC 中断中更新，volatile 确保主循环可见） */
+static volatile uint16_t s_adc1InjRaw[INA303_ADC1_INJ_NUM];
+static volatile uint16_t s_adc2InjRaw[INA303_ADC2_INJ_NUM];
+
+/* JEOC 完成标志（用于双 ADC 同步） */
+static volatile uint8_t s_adc1JeocDone = 0;
+static volatile uint8_t s_adc2JeocDone = 0;
 
 /* 通道运行时数据 */
 static INA303_ChannelData_t s_chData[INA303_CH_NUM];
 
-/* DMA状态标志（volatile，在中断和主循环间同步） */
-static volatile uint8_t s_dmaHalfReady = 0;
-static volatile uint8_t s_dmaFullReady = 0;
-
 /* 全局故障标志 */
 static volatile uint8_t s_faultFlags = 0;
+
+/* 动态过流阈值（运行时可调，默认使用宏定义值） */
+static float s_ocThresholdA = INA303_OC_THRESHOLD_A;
 
 /* 初始化完成标志 */
 static uint8_t s_initDone = 0;
 
 /* 零偏校准状态 */
 static INA303_CalState_t s_calState = INA303_CAL_IDLE;
-static uint8_t s_calChIndex = 0;
+static uint8_t  s_calChIndex = 0;
 static uint16_t s_calSampleCnt = 0;
-static int32_t s_calAccSum = 0;
+static int32_t  s_calAccSum = 0;
 
 /* =======================================================================================================
  * 内部函数声明
  * ======================================================================================================= */
-static void INA303_ProcessBuffer(const uint16_t *pBuffer);
+static void INA303_ProcessADC1InjData(void);
+static void INA303_ProcessADC2InjData(void);
+static void INA303_PollADC3(void);
 static void INA303_UpdateFilter(INA303_ChannelIndex_t ch);
 static void INA303_CalculatePhysical(INA303_ChannelIndex_t ch);
 static void INA303_CheckProtection(void);
@@ -145,32 +128,31 @@ static void INA303_CheckProtection(void);
  * ======================================================================================================= */
 
 /**
- * @brief  初始化INA303驱动
- * @note   调用本函数前，必须已在CUBEMX中配置好ADC和DMA，并生成代码。
- *         本函数会启动ADC DMA循环传输。
+ * @brief  初始化 INA303 驱动
+ * @note   调用前 CUBEMX 必须已完成：
+ *         - ADC1/ADC2 注入组 3 通道，TIM1_CC4 RISING 触发，JEOC 中断使能
+ *         - ADC3 规则组 2 通道（Vbus+Temp），软件触发
+ *         - TIM1 CH4 配置为 PWM Mode 2 No Output，CCR4=4050
+ *         - 注入组采样时间 = 3 Cycles（关键！）
  */
 void BSP_INA303_Init(void)
 {
     uint8_t i, j;
 
-    /* 清零所有运行时数据 */
     memset(s_chData, 0, sizeof(s_chData));
-    memset(s_dmaBuffer, 0, sizeof(s_dmaBuffer));
-    s_dmaHalfReady = 0;
-    s_dmaFullReady = 0;
+    memset((void *)s_adc1InjRaw, 0, sizeof(s_adc1InjRaw));
+    memset((void *)s_adc2InjRaw, 0, sizeof(s_adc2InjRaw));
+    s_adc1JeocDone = 0;
+    s_adc2JeocDone = 0;
     s_faultFlags = 0;
     s_initDone = 0;
     s_calState = INA303_CAL_IDLE;
 
-    /* 初始化各通道默认值 */
     for (i = 0; i < INA303_CH_NUM; i++) {
         s_chData[i].offsetAdc = s_chConfig[i].defaultOffset;
         s_chData[i].gainCal   = INA303_DEFAULT_GAIN_CAL;
 
-        /* 预填充滤波器（避免启动时输出跳变） */
-        uint16_t initVal = (s_chConfig[i].type == INA303_TYPE_CURRENT)
-                           ? (uint16_t)s_chConfig[i].defaultOffset
-                           : 0U;
+        uint16_t initVal = (uint16_t)s_chConfig[i].defaultOffset;
         for (j = 0; j < INA303_FILTER_SIZE; j++) {
             s_chData[i].filterBuf[j] = initVal;
         }
@@ -179,88 +161,108 @@ void BSP_INA303_Init(void)
         s_chData[i].filterReady = 0;
     }
 
-    /* 启动ADC DMA循环传输 */
-    HAL_ADC_Start_DMA(&INA303_ADC_HANDLE, (uint32_t *)s_dmaBuffer, INA303_DMA_BUFFER_SIZE);
+    /* TIM1 CH4 触发点 */
+    TIM1->CCR4 = INA303_TIM1_CCR4_VALUE;
+
+    /* 启动 TIM1 CH4（No Output，仅产生 OC4REF 事件） */
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+    /* 启动 ADC1 注入组中断模式（等待 TIM1_CC4 硬件触发） */
+    HAL_ADCEx_InjectedStart_IT(&INA303_ADC1_HANDLE);
+
+    /* ADC2 根据宏决定是否启动（启动阶段通常禁用 BEMF） */
+#if INA303_USE_ADC2_BEMF
+    HAL_ADCEx_InjectedStart_IT(&INA303_ADC2_HANDLE);
+#endif
 
     s_initDone = 1;
 }
 
 /**
- * @brief  DMA半传输完成回调（需在HAL_ADC_ConvHalfCpltCallback中调用）
+ * @brief  ADC1 JEOC 中断回调（20kHz）
+ * @note   极致轻量：只读 JDR 寄存器，不做任何计算
  */
-void BSP_INA303_DMAHalfCplt(void)
+void BSP_INA303_ADC1_JEOC_IRQHandler(void)
 {
     if (!s_initDone) {
         return;
     }
-    INA303_ProcessBuffer(&s_dmaBuffer[0]);
-    s_dmaHalfReady = 1;
+    s_adc1InjRaw[INA303_ADC1_INJ_RANK_IU] = (uint16_t)(INA303_ADC1_HANDLE.Instance->JDR1);
+    s_adc1InjRaw[INA303_ADC1_INJ_RANK_IV] = (uint16_t)(INA303_ADC1_HANDLE.Instance->JDR2);
+    s_adc1InjRaw[INA303_ADC1_INJ_RANK_IW] = (uint16_t)(INA303_ADC1_HANDLE.Instance->JDR3);
+    s_adc1JeocDone = 1;
 }
 
 /**
- * @brief  DMA传输完成回调（需在HAL_ADC_ConvCpltCallback中调用）
+ * @brief  ADC2 JEOC 中断回调（20kHz）
+ * @note   极致轻量：只读 JDR 寄存器，不做任何计算
  */
-void BSP_INA303_DMACplt(void)
+void BSP_INA303_ADC2_JEOC_IRQHandler(void)
 {
     if (!s_initDone) {
         return;
     }
-    INA303_ProcessBuffer(&s_dmaBuffer[INA303_ADC_CHANNEL_NUM]);
-    s_dmaFullReady = 1;
+    s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_A] = (uint16_t)(INA303_ADC2_HANDLE.Instance->JDR1);
+    s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_B] = (uint16_t)(INA303_ADC2_HANDLE.Instance->JDR2);
+    s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_C] = (uint16_t)(INA303_ADC2_HANDLE.Instance->JDR3);
+    s_adc2JeocDone = 1;
 }
 
 /**
- * @brief  处理DMA缓冲区数据（提取各通道原始值）
- * @param  pBuffer: 缓冲区首地址（长度为INA303_ADC_CHANNEL_NUM）
+ * @brief  检查注入组是否已完成转换
+ * @retval 1: 已完成（内部标志自动清零），0: 尚未完成
+ * @note   若 INA303_USE_ADC2_BEMF=0，只检查 ADC1；
+ *         若=1，需 ADC1+ADC2 都完成后才返回 1。
  */
-static void INA303_ProcessBuffer(const uint16_t *pBuffer)
+uint8_t BSP_INA303_IsInjectedDone(void)
 {
-    uint8_t i;
-    uint8_t rank;
-    uint16_t sample;
-
-    for (i = 0; i < INA303_CH_NUM; i++) {
-        rank = s_chConfig[i].adcRank;
-        sample = pBuffer[rank];
-
-        /* ADC数值有效性检查（12位ADC不应超过4095） */
-        if (sample > INA303_ADC_MAX_VALUE) {
-            s_faultFlags |= INA303_FAULT_ADC_ERR;
-            continue;
-        }
-
-        s_chData[i].rawAdc = sample;
+    uint8_t ret = 0;
+    DISABLE_INT();
+#if INA303_USE_ADC2_BEMF
+    if (s_adc1JeocDone && s_adc2JeocDone) {
+        s_adc1JeocDone = 0;
+        s_adc2JeocDone = 0;
+        ret = 1;
     }
+#else
+    if (s_adc1JeocDone) {
+        s_adc1JeocDone = 0;
+        ret = 1;
+    }
+#endif
+    ENABLE_INT();
+    return ret;
 }
 
 /**
- * @brief  快速循环任务（建议在1kHz~10kHz中断中调用）
- * @note   本函数执行滤波、物理量计算和保护检测。调用频率越高，消抖响应越快。
+ * @brief  运行时启动 ADC2 注入组（用于发电模式检测前启用 BEMF）
+ * @note   调用后 ADC2 开始响应 TIM1_CC4 触发，JEOC 中断生效
+ */
+void BSP_INA303_ADC2_Start(void)
+{
+    HAL_ADCEx_InjectedStart_IT(&INA303_ADC2_HANDLE);
+}
+
+/**
+ * @brief  快速循环任务（建议在 1kHz 定时中断或主循环中调用）
+ * @note   执行：提取注入组数据 -> ADC3 轮询 -> 滤波 -> 物理量计算 -> 保护检测
  */
 void BSP_INA303_FastTask(void)
 {
     uint8_t i;
-    uint8_t newData = 0;
 
     if (!s_initDone) {
         return;
     }
 
-    /* 检查是否有新DMA数据（原子操作读取标志） */
-    DISABLE_INT();
-    if (s_dmaHalfReady || s_dmaFullReady) {
-        s_dmaHalfReady = 0;
-        s_dmaFullReady = 0;
-        newData = 1;
-    }
-    ENABLE_INT();
+    /* 提取注入组新数据 */
+    INA303_ProcessADC1InjData();
+    INA303_ProcessADC2InjData();
 
-    /* 无新数据则跳过 */
-    if (!newData) {
-        return;
-    }
+    /* ADC3 规则组软件轮询（Vbus + Temp） */
+    INA303_PollADC3();
 
-    /* 逐通道更新滤波器和计算物理量 */
+    /* 逐通道滤波和物理量计算 */
     for (i = 0; i < INA303_CH_NUM; i++) {
         INA303_UpdateFilter((INA303_ChannelIndex_t)i);
         INA303_CalculatePhysical((INA303_ChannelIndex_t)i);
@@ -269,21 +271,118 @@ void BSP_INA303_FastTask(void)
     /* 保护检测 */
     INA303_CheckProtection();
 
-    /* 零偏校准轮询（如果处于校准模式） */
+    /* 零偏校准轮询（仅对电流通道） */
     if (s_calState == INA303_CAL_RUNNING) {
         (void)BSP_INA303_CalibrateZeroPoll();
     }
 }
 
+/* =======================================================================================================
+ * 数据提取
+ * ======================================================================================================= */
+
+static void INA303_ProcessADC1InjData(void)
+{
+    uint16_t sample;
+
+    sample = s_adc1InjRaw[INA303_ADC1_INJ_RANK_IU];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_IU].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+
+    sample = s_adc1InjRaw[INA303_ADC1_INJ_RANK_IV];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_IV].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+
+    sample = s_adc1InjRaw[INA303_ADC1_INJ_RANK_IW];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_IW].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+}
+
+static void INA303_ProcessADC2InjData(void)
+{
+    uint16_t sample;
+
+    sample = s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_A];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_BEMF_A].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+
+    sample = s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_B];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_BEMF_B].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+
+    sample = s_adc2InjRaw[INA303_ADC2_INJ_RANK_BEMF_C];
+    if (sample <= INA303_ADC_MAX_VALUE) {
+        s_chData[INA303_CH_BEMF_C].rawAdc = sample;
+    } else {
+        s_faultFlags |= INA303_FAULT_ADC_ERR;
+    }
+}
+
 /**
- * @brief  更新滑动平均滤波器
+ * @brief  ADC3 规则组软件轮询（1kHz，非阻塞，适合中断上下文）
+ * @note   直接查询 EOC 标志，避免 HAL_PollForConversion 的 ms 级阻塞
  */
+static void INA303_PollADC3(void)
+{
+    uint16_t val;
+    uint32_t timeout;
+
+    /* 启动 ADC3 规则组扫描 */
+    if (HAL_ADC_Start(&INA303_ADC3_HANDLE) != HAL_OK) {
+        return;
+    }
+
+    /* 等待 Rank1 (Vbus) EOC —— 非阻塞软件超时 */
+    timeout = 1000;
+    while (!(__HAL_ADC_GET_FLAG(&INA303_ADC3_HANDLE, ADC_FLAG_EOC)) && timeout--) {}
+    if (timeout) {
+        val = (uint16_t)HAL_ADC_GetValue(&INA303_ADC3_HANDLE);
+        if (val <= INA303_ADC_MAX_VALUE) {
+            s_chData[INA303_CH_VBUS].rawAdc = val;
+        } else {
+            s_faultFlags |= INA303_FAULT_ADC_ERR;
+        }
+    }
+
+    /* 等待 Rank2 (Temp) EOC —— 非阻塞软件超时 */
+    timeout = 1000;
+    while (!(__HAL_ADC_GET_FLAG(&INA303_ADC3_HANDLE, ADC_FLAG_EOC)) && timeout--) {}
+    if (timeout) {
+        val = (uint16_t)HAL_ADC_GetValue(&INA303_ADC3_HANDLE);
+        if (val <= INA303_ADC_MAX_VALUE) {
+            s_chData[INA303_CH_TEMP].rawAdc = val;
+        } else {
+            s_faultFlags |= INA303_FAULT_ADC_ERR;
+        }
+    }
+
+    HAL_ADC_Stop(&INA303_ADC3_HANDLE);
+}
+
+/* =======================================================================================================
+ * 滤波与物理量计算
+ * ======================================================================================================= */
+
 static void INA303_UpdateFilter(INA303_ChannelIndex_t ch)
 {
     INA303_ChannelData_t *pCh = &s_chData[ch];
     uint16_t newSample = pCh->rawAdc;
 
-    /* 移除最老的值，加入最新值 */
     pCh->filterSum -= pCh->filterBuf[pCh->filterIdx];
     pCh->filterBuf[pCh->filterIdx] = newSample;
     pCh->filterSum += newSample;
@@ -291,15 +390,12 @@ static void INA303_UpdateFilter(INA303_ChannelIndex_t ch)
     pCh->filterIdx++;
     if (pCh->filterIdx >= INA303_FILTER_SIZE) {
         pCh->filterIdx = 0;
-        pCh->filterReady = 1;   /* 滤波器已满，输出有效 */
+        pCh->filterReady = 1;
     }
 
     pCh->filteredAdc = (uint16_t)(pCh->filterSum >> INA303_FILTER_SHIFT);
 }
 
-/**
- * @brief  计算物理量（电流A或电压V）
- */
 static void INA303_CalculatePhysical(INA303_ChannelIndex_t ch)
 {
     INA303_ChannelData_t *pCh = &s_chData[ch];
@@ -307,46 +403,60 @@ static void INA303_CalculatePhysical(INA303_ChannelIndex_t ch)
     float result;
 
     if (!pCh->filterReady) {
-        return;     /* 滤波器未填满，暂不计算 */
+        return;
     }
 
     adcDiff = (int32_t)pCh->filteredAdc - pCh->offsetAdc;
 
-    if (s_chConfig[ch].type == INA303_TYPE_CURRENT) {
-        /* 电流 = (ADC - offset) × 转换系数 × 增益校准 */
-        result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
-    } else {
-        /* 电压：不允许负值（分压电路不可能输出负电压） */
-        if (adcDiff < 0) {
-            adcDiff = 0;
-        }
-        result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
+    switch (s_chConfig[ch].type) {
+        case INA303_TYPE_CURRENT:
+            result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
+            break;
+
+        case INA303_TYPE_BEMF:
+            /* BEMF：单向电压，不允许负值 */
+            if (adcDiff < 0) {
+                adcDiff = 0;
+            }
+            result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
+            break;
+
+        case INA303_TYPE_VOLTAGE:
+            /* Vbus：单向电压，不允许负值 */
+            if (adcDiff < 0) {
+                adcDiff = 0;
+            }
+            result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
+            break;
+
+        case INA303_TYPE_TEMP:
+        default:
+            result = (float)adcDiff * s_chConfig[ch].scaleFactor * pCh->gainCal;
+            break;
     }
 
     pCh->physicalValue = result;
 }
 
-/**
- * @brief  保护检测（过流/欠流/过压/欠压）
- * @note   采用独立消抖计数 + 迟滞释放，避免边界抖动导致误动作
- */
+/* =======================================================================================================
+ * 保护检测
+ * ======================================================================================================= */
+
 static void INA303_CheckProtection(void)
 {
     INA303_ChannelData_t *pCh;
     float val;
-    float ocRelease;
-    float ucRelease;
+    float ocRelease, ucRelease;
     uint8_t i;
 
-    /* 检测三相电流（过流/欠流） */
-    for (i = 0; i < 3; i++) {   /* IU, IV, IW */
+    /* 三相电流：过流 / 欠流 */
+    for (i = 0; i < 3; i++) {
         pCh = &s_chData[i];
         if (!pCh->filterReady) {
             continue;
         }
         val = pCh->physicalValue;
 
-        /* 过流检测 */
         ocRelease = INA303_OC_THRESHOLD_A * INA303_PROT_HYSTERESIS;
         if (val > INA303_OC_THRESHOLD_A) {
             if (pCh->protDebounceOC < INA303_PROT_DEBOUNCE_CNT) {
@@ -364,8 +474,7 @@ static void INA303_CheckProtection(void)
             }
         }
 
-        /* 欠流检测（负向过流，发电工况） */
-        ucRelease = INA303_UC_THRESHOLD_A * INA303_PROT_HYSTERESIS; /* 负值×0.9 = 更接近0 */
+        ucRelease = INA303_UC_THRESHOLD_A * INA303_PROT_HYSTERESIS;
         if (val < INA303_UC_THRESHOLD_A) {
             if (pCh->protDebounceUC < INA303_PROT_DEBOUNCE_CNT) {
                 pCh->protDebounceUC++;
@@ -383,14 +492,13 @@ static void INA303_CheckProtection(void)
         }
     }
 
-    /* 母线电压检测（过压/欠压） */
+    /* 母线电压：过压 / 欠压 */
     pCh = &s_chData[INA303_CH_VBUS];
     if (!pCh->filterReady) {
         return;
     }
     val = pCh->physicalValue;
 
-    /* 过压 */
     if (val > INA303_OV_THRESHOLD_V) {
         if (pCh->protDebounceOV < INA303_PROT_DEBOUNCE_CNT) {
             pCh->protDebounceOV++;
@@ -407,7 +515,6 @@ static void INA303_CheckProtection(void)
         }
     }
 
-    /* 欠压 */
     if (val < INA303_UV_THRESHOLD_V) {
         if (pCh->protDebounceUV < INA303_PROT_DEBOUNCE_CNT) {
             pCh->protDebounceUV++;
@@ -426,51 +533,49 @@ static void INA303_CheckProtection(void)
 }
 
 /* =======================================================================================================
- * 获取接口实现
+ * 获取接口
  * ======================================================================================================= */
 
-float BSP_INA303_GetCurrentU(void)  { return s_chData[INA303_CH_IU].physicalValue; }
-float BSP_INA303_GetCurrentV(void)  { return s_chData[INA303_CH_IV].physicalValue; }
-float BSP_INA303_GetCurrentW(void)  { return s_chData[INA303_CH_IW].physicalValue; }
-float BSP_INA303_GetBusVoltage(void){ return s_chData[INA303_CH_VBUS].physicalValue; }
+float BSP_INA303_GetCurrentU(void)    { return s_chData[INA303_CH_IU].physicalValue; }
+float BSP_INA303_GetCurrentV(void)    { return s_chData[INA303_CH_IV].physicalValue; }
+float BSP_INA303_GetCurrentW(void)    { return s_chData[INA303_CH_IW].physicalValue; }
+float BSP_INA303_GetBemfA(void)       { return s_chData[INA303_CH_BEMF_A].physicalValue; }
+float BSP_INA303_GetBemfB(void)       { return s_chData[INA303_CH_BEMF_B].physicalValue; }
+float BSP_INA303_GetBemfC(void)       { return s_chData[INA303_CH_BEMF_C].physicalValue; }
+float BSP_INA303_GetBusVoltage(void)  { return s_chData[INA303_CH_VBUS].physicalValue; }
+float BSP_INA303_GetTemperature(void) { return s_chData[INA303_CH_TEMP].physicalValue; }
 
-uint16_t BSP_INA303_GetRawU(void)   { return s_chData[INA303_CH_IU].rawAdc; }
-uint16_t BSP_INA303_GetRawV(void)   { return s_chData[INA303_CH_IV].rawAdc; }
-uint16_t BSP_INA303_GetRawW(void)   { return s_chData[INA303_CH_IW].rawAdc; }
-uint16_t BSP_INA303_GetRawVbus(void){ return s_chData[INA303_CH_VBUS].rawAdc; }
+uint16_t BSP_INA303_GetRaw(INA303_ChannelIndex_t ch)
+{
+    if (ch >= INA303_CH_NUM) {
+        return 0;
+    }
+    return s_chData[ch].rawAdc;
+}
 
-uint16_t BSP_INA303_GetFilteredU(void)    { return s_chData[INA303_CH_IU].filteredAdc; }
-uint16_t BSP_INA303_GetFilteredV(void)    { return s_chData[INA303_CH_IV].filteredAdc; }
-uint16_t BSP_INA303_GetFilteredW(void)    { return s_chData[INA303_CH_IW].filteredAdc; }
-uint16_t BSP_INA303_GetFilteredVbus(void) { return s_chData[INA303_CH_VBUS].filteredAdc; }
+uint16_t BSP_INA303_GetFiltered(INA303_ChannelIndex_t ch)
+{
+    if (ch >= INA303_CH_NUM) {
+        return 0;
+    }
+    return s_chData[ch].filteredAdc;
+}
 
 /* =======================================================================================================
- * 校准接口实现
+ * 校准接口
  * ======================================================================================================= */
 
-/**
- * @brief  启动零偏校准
- * @note   调用前必须确保三相电流均为0A（电机停转、无负载），否则校准结果错误。
- *         校准完成后，offset会自动写入各电流通道。
- */
 void BSP_INA303_CalibrateZeroStart(void)
 {
     if (s_calState != INA303_CAL_IDLE) {
         return;
     }
-
     s_calState = INA303_CAL_RUNNING;
     s_calChIndex = 0;
     s_calSampleCnt = 0;
     s_calAccSum = 0;
 }
 
-/**
- * @brief  轮询零偏校准状态（非阻塞，在FastTask中自动调用，也可在主循环手动轮询）
- * @retval INA303_CAL_IDLE     空闲
- * @retval INA303_CAL_RUNNING  校准中
- * @retval INA303_CAL_DONE     校准完成
- */
 INA303_CalState_t BSP_INA303_CalibrateZeroPoll(void)
 {
     uint8_t ch;
@@ -479,58 +584,40 @@ INA303_CalState_t BSP_INA303_CalibrateZeroPoll(void)
         return s_calState;
     }
 
-    /* 只对电流通道进行校准 */
     for (ch = s_calChIndex; ch < INA303_CH_NUM; ch++) {
         if (s_chConfig[ch].type != INA303_TYPE_CURRENT) {
             continue;
         }
-
-        /* 累加当前通道的滤波后ADC值 */
         if (s_chData[ch].filterReady) {
             s_calAccSum += s_chData[ch].filteredAdc;
             s_calSampleCnt++;
-
             if (s_calSampleCnt >= INA303_CAL_SAMPLE_NUM) {
-                /* 本通道完成，计算平均值 */
                 s_chData[ch].offsetAdc = (int16_t)(s_calAccSum >> INA303_CAL_SAMPLE_SHIFT);
-
-                /* 切换下一通道 */
                 s_calAccSum = 0;
                 s_calSampleCnt = 0;
                 s_calChIndex = ch + 1;
             }
-            break;  /* 每次只处理一个通道的一帧数据 */
+            break;
         }
     }
 
-    /* 检查是否所有电流通道都已完成 */
     if (s_calChIndex >= INA303_CH_NUM) {
         s_calState = INA303_CAL_DONE;
     }
-
     return s_calState;
 }
 
-/**
- * @brief  设置指定通道的增益校准系数
- * @param  ch: 通道索引
- * @param  gainCal: 校准系数（1.0为无修正，0.98表示实际增益比理论小2%）
- */
 void BSP_INA303_SetGainCal(INA303_ChannelIndex_t ch, float gainCal)
 {
     if (ch >= INA303_CH_NUM) {
         return;
     }
     if (gainCal < 0.5f || gainCal > 1.5f) {
-        /* 增益系数异常，拒绝写入（防止误操作） */
         return;
     }
     s_chData[ch].gainCal = gainCal;
 }
 
-/**
- * @brief  获取指定通道的增益校准系数
- */
 float BSP_INA303_GetGainCal(INA303_ChannelIndex_t ch)
 {
     if (ch >= INA303_CH_NUM) {
@@ -540,7 +627,7 @@ float BSP_INA303_GetGainCal(INA303_ChannelIndex_t ch)
 }
 
 /* =======================================================================================================
- * 故障接口实现
+ * 故障接口
  * ======================================================================================================= */
 
 uint8_t BSP_INA303_GetFaultFlags(void)
@@ -585,26 +672,20 @@ uint8_t BSP_INA303_IsUnderVoltage(void)
 }
 
 /* =======================================================================================================
- * 硬件比较器预留（Alert引脚中断回调）
+ * 动态过流阈值接口
  * ======================================================================================================= */
 
-/**
- * @brief  Alert1中断回调（如接入硬件比较器输出，在对应EXTI中断服务函数中调用）
- * @note   可用于硬件级快速过流保护（响应时间约1us）
- */
-void BSP_INA303_Alert1_IRQHandler(void)
+void BSP_INA303_SetOCThreshold(float thresholdA)
 {
-    /* 硬件快速保护：直接置位过流标志 */
-    s_faultFlags |= INA303_FAULT_OVER_CUR;
+    if (thresholdA < 1.0f || thresholdA > 500.0f) {
+        return;     /* 异常值拒绝写入 */
+    }
+    s_ocThresholdA = thresholdA;
 }
 
-/**
- * @brief  Alert2中断回调（如接入硬件比较器输出，在对应EXTI中断服务函数中调用）
- */
-void BSP_INA303_Alert2_IRQHandler(void)
+float BSP_INA303_GetOCThreshold(void)
 {
-    /* 根据实际硬件连接定义保护类型，此处预留 */
-    /* s_faultFlags |= INA303_FAULT_UNDER_CUR; */
+    return s_ocThresholdA;
 }
 
 /***************************** (END OF FILE) *********************************/

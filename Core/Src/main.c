@@ -103,13 +103,15 @@ int main(void)
   MX_CAN1_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
-  MX_USART1_UART_Init();
   MX_ADC2_Init();
   MX_IWDG_Init();
   MX_TIM5_Init();
   MX_USART3_UART_Init();
+  MX_ADC3_Init();
   /* USER CODE BEGIN 2 */
+#ifdef DEBUG
   __HAL_DBGMCU_FREEZE_IWDG();	// 调试时冻结 IWDG，避免断点导致复位
+#endif
   
   bsp_Init();
   
@@ -125,42 +127,37 @@ int main(void)
     //空闲调用
 		hal_fast_loop();
 		
-		//1Hz
-		if(get_system_time_ms() > last_1Hz_timestamp + 1000)
+		//1Hz (1000ms)
+		while(get_system_time_ms() >= last_1Hz_timestamp + 1000)
 		{
-		  last_1Hz_timestamp = get_system_time_ms();
+		  last_1Hz_timestamp += 1000;
 			hal_1hz_loop();
 		}
-		//2Hz
-		if(get_system_time_ms() > last_2Hz_timestamp + 500)
+		//2Hz (500ms)
+		while(get_system_time_ms() >= last_2Hz_timestamp + 500)
 		{
-		  last_2Hz_timestamp = get_system_time_ms();
+		  last_2Hz_timestamp += 500;
 			hal_2hz_loop();
 		}
-		//10Hz
-		if(get_system_time_ms() > last_10Hz_timestamp + 100)
+		//10Hz (100ms)
+		while(get_system_time_ms() >= last_10Hz_timestamp + 100)
 		{
-		  last_10Hz_timestamp = get_system_time_ms();
+		  last_10Hz_timestamp += 100;
 			hal_10hz_loop();
-		}	
-		//50hz
-		if(get_system_time_ms() > last_50Hz_timestamp + 20)
-		{
-		  last_50Hz_timestamp = get_system_time_ms();
-			hal_50hz_loop();
-		}	
-		//100Hz
-		if(get_system_time_ms() > last_100Hz_timestamp + 10)
-		{
-		  last_100Hz_timestamp = get_system_time_ms();
-			hal_100hz_loop();
-		}	
-		//1000Hz
-		if(get_system_time_ms() > last_1000Hz_timestamp + 1)
-		{
-		  last_1000Hz_timestamp = get_system_time_ms();
-			hal_1000hz_loop();
 		}
+		//50Hz (20ms)
+		while(get_system_time_ms() >= last_50Hz_timestamp + 20)
+		{
+		  last_50Hz_timestamp += 20;
+			hal_50hz_loop();
+		}
+		//100Hz (10ms)
+		while(get_system_time_ms() >= last_100Hz_timestamp + 10)
+		{
+		  last_100Hz_timestamp += 10;
+			hal_100hz_loop();
+		}
+		/* 1000Hz任务已在 HAL_TIM_PeriodElapsedCallback(TIM5) 中断执行，主循环不再轮询 */
   }
   /* USER CODE END 3 */
 }
@@ -188,9 +185,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 160;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -217,6 +214,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if(htim->Instance == TIM5)
 	{
 	  system_timer_tick();
+		hal_1000hz_loop();  /* 1kHz实时任务在中断中执行，保证时序精度 */
 	}
 
 }

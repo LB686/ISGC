@@ -16,6 +16,8 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "../../app/app_motor_uart_parse.h"
+#include "../../app/app_motor_startup.h"
+#include "../../bsp/inc/bsp_ina303.h"
 #include <string.h>
 
 /* Private define -------------------------------------------------------------*/
@@ -170,35 +172,27 @@ static void MOTOR_ParseSetSpd(const uint8_t *data, uint8_t len)
 static void MOTOR_ParseTelemetry(const uint8_t *data, uint8_t len)
 {
     uint8_t txBuf[57];
+    float duty;
 
-    /* 将单片机实时状态拷贝至 s_telemetry */
-    /* TODO: 以下赋值请替换为你的实际全局变量 */
-    tagMOTOR_Telemetry_T g_motor = {
-    .mos_temp      = 250,    // 25.0℃
-    .mot_temp      = 300,    // 30.0℃
-    .phase_current = 500,    // 5.00A
-    .bus_current   = 2000,   // 20.00A
-    .id_current    = -100,   // -1.00A
-    .iq_current    = 1500,   // 15.00A
-    .duty          = 500,    // 0.500 (50.0%)
-    .elec_speed    = 3000,   // 3000 rpm
-    .bus_voltage   = 240,    // 24.0V
-    .fault         = 0,      // 无故障
-    .position      = 360000000UL  // 360.000000 (假设单位是度或弧度)
-    };
+    (void)data;
+    (void)len;
 
+    /* 从电机控制模块获取实时数据 */
+    duty = MOTOR_GetBusVoltage() > 5.0f ? (MOTOR_GetIq() / MOTOR_GetBusVoltage()) : 0.0f;
+    if (duty < 0.0f) duty = 0.0f;
+    if (duty > 1.0f) duty = 1.0f;
 
-    s_telemetry.mos_temp       = g_motor.mos_temp;
-    s_telemetry.mot_temp       = g_motor.mot_temp;
-    s_telemetry.phase_current  = g_motor.phase_current;
-    s_telemetry.bus_current    = g_motor.bus_current;
-    s_telemetry.id_current     = g_motor.id_current;
-    s_telemetry.iq_current     = g_motor.iq_current;
-    s_telemetry.duty           = g_motor.duty;
-    s_telemetry.elec_speed     = g_motor.elec_speed;
-    s_telemetry.bus_voltage    = g_motor.bus_voltage;
-    s_telemetry.fault          = g_motor.fault;
-    s_telemetry.position       = g_motor.position;
+    s_telemetry.mos_temp       = (uint16_t)(BSP_INA303_GetTemperature() * 10.0f);   /* 0.1℃ */
+    s_telemetry.mot_temp       = (uint16_t)(BSP_INA303_GetTemperature() * 10.0f);   /* 无独立电机温度，暂用MOS */
+    s_telemetry.phase_current  = (int32_t)(MOTOR_GetIu() * 100.0f);                 /* 0.01A */
+    s_telemetry.bus_current    = (int32_t)(MOTOR_GetIq() * 100.0f);                 /* 0.01A */
+    s_telemetry.id_current     = (int32_t)(MOTOR_GetId() * 100.0f);                 /* 0.01A */
+    s_telemetry.iq_current     = (int32_t)(MOTOR_GetIq() * 100.0f);                 /* 0.01A */
+    s_telemetry.duty           = (uint16_t)(duty * 1000.0f);                        /* 0.001 */
+    s_telemetry.elec_speed     = (int32_t)MOTOR_GetMechSpeedRPM();                  /* rpm */
+    s_telemetry.bus_voltage    = (uint16_t)(MOTOR_GetBusVoltage() * 10.0f);         /* 0.1V */
+    s_telemetry.fault          = MOTOR_GetFaultCode();
+    s_telemetry.position       = 0;                                                 /* 无位置传感器 */
 
     /*
      * 将 s_telemetry 各字段按协议 BYTE1-57 的顺序逐个拷贝到 txBuf。
@@ -287,8 +281,21 @@ static void MOTOR_FrameComplete(void)
 
 /*
 *********************************************************************************************************
+*   函 数 名: APP_MotorUartParse_RxByteCallback
+*   功能说明: 串口逐字节接收回调，注册到 bsp_uart 驱动
+*   形    参: byte  接收到的字节
+*   返 回 值: 无
+*********************************************************************************************************
+*/
+static void APP_MotorUartParse_RxByteCallback(uint8_t byte)
+{
+    APP_MotorUartParse_Process(byte);
+}
+
+/*
+*********************************************************************************************************
 *   函 数 名: APP_MotorUartParse_Init
-*   功能说明: 初始化串口解析模块
+*   功能说明: 初始化串口解析模块，并注册接收回调到驱动层
 *   形    参: 无
 *   返 回 值: 无
 *********************************************************************************************************
@@ -296,6 +303,7 @@ static void MOTOR_FrameComplete(void)
 void APP_MotorUartParse_Init(void)
 {
     APP_MotorUartParse_Reset();
+    usart3_register_rx_callback(APP_MotorUartParse_RxByteCallback);
 }
 
 /*

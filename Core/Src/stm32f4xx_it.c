@@ -22,6 +22,8 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bsp_ina303.h"
+#include "app_motor_startup.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,12 +59,10 @@
 /* External variables --------------------------------------------------------*/
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
-extern CAN_HandleTypeDef hcan1;
+extern ADC_HandleTypeDef hadc3;
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim5;
-extern DMA_HandleTypeDef hdma_usart1_tx;
 extern DMA_HandleTypeDef hdma_usart3_tx;
-extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart3;
 /* USER CODE BEGIN EV */
 
@@ -226,27 +226,28 @@ void DMA1_Stream3_IRQHandler(void)
 void ADC_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC_IRQn 0 */
-
+    /* 自定义JEOC处理：直接读取JDR寄存器，绕过HAL回调，减少中断延迟 */
+    if (__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_JEOC)) {
+        __HAL_ADC_CLEAR_FLAG(&hadc1, ADC_FLAG_JEOC);
+        BSP_INA303_ADC1_JEOC_IRQHandler();
+    }
+#if INA303_USE_ADC2_BEMF
+    if (__HAL_ADC_GET_FLAG(&hadc2, ADC_FLAG_JEOC)) {
+        __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_JEOC);
+        BSP_INA303_ADC2_JEOC_IRQHandler();
+    }
+#endif
+    /* 注入组完成后调用20kHz FOC快速控制 */
+    if (BSP_INA303_IsInjectedDone()) {
+        MOTOR_FastControlTask();
+    }
   /* USER CODE END ADC_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);
+  HAL_ADC_IRQHandler(&hadc3);
   /* USER CODE BEGIN ADC_IRQn 1 */
 
   /* USER CODE END ADC_IRQn 1 */
-}
-
-/**
-  * @brief This function handles CAN1 RX0 interrupts.
-  */
-void CAN1_RX0_IRQHandler(void)
-{
-  /* USER CODE BEGIN CAN1_RX0_IRQn 0 */
-
-  /* USER CODE END CAN1_RX0_IRQn 0 */
-  HAL_CAN_IRQHandler(&hcan1);
-  /* USER CODE BEGIN CAN1_RX0_IRQn 1 */
-
-  /* USER CODE END CAN1_RX0_IRQn 1 */
 }
 
 /**
@@ -261,20 +262,6 @@ void TIM1_BRK_TIM9_IRQHandler(void)
   /* USER CODE BEGIN TIM1_BRK_TIM9_IRQn 1 */
 
   /* USER CODE END TIM1_BRK_TIM9_IRQn 1 */
-}
-
-/**
-  * @brief This function handles USART1 global interrupt.
-  */
-void USART1_IRQHandler(void)
-{
-  /* USER CODE BEGIN USART1_IRQn 0 */
-
-  /* USER CODE END USART1_IRQn 0 */
-  HAL_UART_IRQHandler(&huart1);
-  /* USER CODE BEGIN USART1_IRQn 1 */
-
-  /* USER CODE END USART1_IRQn 1 */
 }
 
 /**
@@ -303,20 +290,6 @@ void TIM5_IRQHandler(void)
   /* USER CODE BEGIN TIM5_IRQn 1 */
 
   /* USER CODE END TIM5_IRQn 1 */
-}
-
-/**
-  * @brief This function handles DMA2 stream7 global interrupt.
-  */
-void DMA2_Stream7_IRQHandler(void)
-{
-  /* USER CODE BEGIN DMA2_Stream7_IRQn 0 */
-
-  /* USER CODE END DMA2_Stream7_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_usart1_tx);
-  /* USER CODE BEGIN DMA2_Stream7_IRQn 1 */
-
-  /* USER CODE END DMA2_Stream7_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

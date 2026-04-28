@@ -14,6 +14,7 @@
 "isgc\bsp.o"
 "isgc\bsp_led.o"
 "isgc\bsp_key.o"
+"isgc\bsp_can.o"
 "isgc\bsp_uart.o"
 "isgc\bsp_ringbuff.o"
 "isgc\bsp_system_time.o"

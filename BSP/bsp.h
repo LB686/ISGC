@@ -22,8 +22,8 @@
 	#include "FreeRTOS.h"
 	#include "task.h"
     #include "cmsis_os.h"
-	#define DISABLE_INT()    taskENTER_CRITICAL()
-	#define ENABLE_INT()     taskEXIT_CRITICAL()
+	#define DISABLE_INT()    __set_BASEPRI(1 << (8 - 4))    //taskENTER_CRITICAL()
+	#define ENABLE_INT()     __set_BASEPRI(0)               //taskEXIT_CRITICAL()
 #else
 	/* 开关全局中断的宏 */
 	#define ENABLE_INT()	__set_PRIMASK(0)	/* 使能全局中断 */

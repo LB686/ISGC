@@ -46,7 +46,7 @@ void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
-  htim1.Init.Period = 4000;
+  htim1.Init.Period = 4200-1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 1;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
@@ -89,7 +89,7 @@ void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM2;
-  sConfigOC.Pulse = 4000-2;
+  sConfigOC.Pulse = 4050;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
@@ -97,7 +97,7 @@ void MX_TIM1_Init(void)
   sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
   sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 80;
+  sBreakDeadTimeConfig.DeadTime = 84;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_ENABLE;
   sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
   sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
@@ -126,7 +126,7 @@ void MX_TIM5_Init(void)
 
   /* USER CODE END TIM5_Init 1 */
   htim5.Instance = TIM5;
-  htim5.Init.Prescaler = 160-1;
+  htim5.Init.Prescaler = 84-1;
   htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim5.Init.Period = 1000-1;
   htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -196,29 +196,29 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
 
   /* USER CODE END TIM1_MspPostInit 0 */
 
-    __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
     /**TIM1 GPIO Configuration
-    PA7     ------> TIM1_CH1N
-    PB0     ------> TIM1_CH2N
-    PB1     ------> TIM1_CH3N
+    PB13     ------> TIM1_CH1N
+    PB14     ------> TIM1_CH2N
+    PB15     ------> TIM1_CH3N
     PA8     ------> TIM1_CH1
     PA9     ------> TIM1_CH2
     PA10     ------> TIM1_CH3
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+    GPIO_InitStruct.Pin = TIM1_INL_A_Pin|TIM1_INL_B_Pin|TIM1_INL_C_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = TIM1_INH_A_Pin|TIM1_INH_B_Pin|TIM1_INH_C_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN TIM1_MspPostInit 1 */
 
